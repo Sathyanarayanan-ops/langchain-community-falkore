@@ -384,7 +384,7 @@ class FalkorDBVector(VectorStore):
             DistanceStrategy.COSINE,
         ]:
             raise ValueError(
-                "`distance_strategy` must be either 'EULIDEAN_DISTANCE` or `COSINE`"
+                "`distance_strategy` must be either `EUCLIDEAN_DISTANCE` or `COSINE`"
             )
 
         # Graph object takes precedent over env or input params
