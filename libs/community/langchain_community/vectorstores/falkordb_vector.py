@@ -28,7 +28,7 @@ def generate_random_string(length: int) -> str:
     return random_string
 
 
-DEFAULT_DISTANCE_STRATEGY = DistanceStrategy.COSINE
+DEFAULT_DISTANCE_STRATEGY = DistanceStrategy.EUCLIDEAN_DISTANCE
 DISTANCE_MAPPING = {
     DistanceStrategy.EUCLIDEAN_DISTANCE: "euclidean",
     DistanceStrategy.COSINE: "cosine",
@@ -492,6 +492,9 @@ class FalkorDBVector(VectorStore):
         Check if the vector index exists in the FalkorDB database
         and returns its embedding dimension, entity_type,
         entity_label, entity_property
+        
+         This version also validates the similarity_function against the configured
+        distance_strategy, so we don't silently reuse an index with the wrong distance metric.
 
         This method;
         1. queries the FalkorDB database for existing indexes
@@ -539,9 +542,20 @@ class FalkorDBVector(VectorStore):
                         entity_type = str(dict["entity_type"])
                         entity_label = str(dict["entity_label"])
                         entity_property = str(dict["entity_property"])
+                        similarity_function = dict.get("index_similarityFunction")
                         break
             if embedding_dimension and entity_type and entity_label and entity_property:
                 self._index_type = IndexType(entity_type)
+                desired_sim = DISTANCE_MAPPING[self._distance_strategy]
+                if similarity_function and similarity_function != desired_sim:
+                    raise ValueError(
+                        f"Existing index on {entity_label}.{entity_property} "
+                        f"uses similarity_function='{similarity_function}', "
+                        f"but requested distance_strategy is '{self._distance_strategy}' "
+                        f"({desired_sim}). "
+                        "Drop/recreate the index or change the distance_strategy."
+                    )
+
                 return embedding_dimension, entity_type, entity_label, entity_property
             else:
                 return None, None, None, None
@@ -729,7 +743,7 @@ class FalkorDBVector(VectorStore):
                 relation_type,
                 embedding_node_property,
                 dim=embedding_dimension,
-                similarity_function=DISTANCE_MAPPING[DEFAULT_DISTANCE_STRATEGY],
+                similarity_function=DISTANCE_MAPPING[self._distance_strategy],
             )
         except Exception as e:
             if "already indexed" in str(e):
@@ -949,6 +963,7 @@ class FalkorDBVector(VectorStore):
         metadatas: Optional[List[dict]] = None,
         ids: Optional[List[str]] = None,
         search_type: SearchType = SearchType.VECTOR,
+        distance_strategy: DistanceStrategy = DEFAULT_DISTANCE_STRATEGY,
         **kwargs: Any,
     ) -> FalkorDBVector:
         if ids is None:
@@ -960,8 +975,10 @@ class FalkorDBVector(VectorStore):
         store = cls(
             embedding=embedding,
             search_type=search_type,
+            distance_strategy=distance_strategy,
             **kwargs,
-        )
+            )
+
 
         # Check if the vector index already exists
         embedding_dimension, index_type, entity_label, entity_property = (
@@ -1139,6 +1156,7 @@ class FalkorDBVector(VectorStore):
         *,
         search_type: SearchType = DEFAULT_SEARCH_TYPE,
         retrieval_query: str = "",
+        distance_strategy = DEFAULT_DISTANCE_STRATEGY,
         **kwargs: Any,
     ) -> FalkorDBVector:
         """
@@ -1198,6 +1216,7 @@ class FalkorDBVector(VectorStore):
             retrieval_query=retrieval_query,
             node_label=node_label,
             embedding_node_property=embedding_node_property,
+            distance_strategy=distance_strategy,
             **kwargs,
         )
 
@@ -1444,15 +1463,19 @@ class FalkorDBVector(VectorStore):
                 f"n.{self.embedding_node_property} IS NOT NULL AND "
             )
 
-            base_cosine_query = (
+            if self._distance_strategy == DistanceStrategy.COSINE:
+                base_distance_query = (
                 " WITH n as node, "
-                f" vec.cosineDistance(n.{self.embedding_node_property}"
-                ", vecf32($embedding)) as score "
-            )
-
+                f" vec.cosineDistance(n.{self.embedding_node_property}, vecf32($embedding)) as score "  
+                )
+            else:
+                base_distance_query = (
+                    " WITH n as node, "
+                    f" vec.euclideanDistance(n.{self.embedding_node_property}, vecf32($embedding)) as score "
+                )
             filter_snippets, filter_params = construct_metadata_filter(filter)
 
-            index_query = base_index_query + filter_snippets + base_cosine_query
+            index_query = base_index_query + filter_snippets + base_distance_query
         else:
             index_query = _get_search_index_query(self.search_type, self._index_type)
             filter_params = {}
